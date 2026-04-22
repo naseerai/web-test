@@ -1,0 +1,77 @@
+image: alpine:latest
+
+stages:
+  - deploy
+
+deploy_job:
+  stage: deploy
+  only:
+    - main
+
+  before_script:
+    - apk add --no-cache openssh-client git
+    - eval $(ssh-agent -s)
+    - echo "$SERVER_SSH_KEY" | tr -d '\r' | ssh-add -
+    - mkdir -p ~/.ssh
+    - chmod 700 ~/.ssh
+    - ssh-keyscan -H "$SERVER_HOST" >> ~/.ssh/known_hosts
+
+  script:
+    - |
+      ssh "$SERVER_USER@$SERVER_HOST" << EOF
+      set -e
+
+      REPO_URL="https://$GIT_USERNAME:$GIT_TOKEN@gitlab.myaccess.cloud/gopisr/myaccess_webiste.git"
+      PROJECT_DIR="/root/projects/myaccess_webiste"
+
+      echo "Starting Deployment..."
+
+      if [ -z "\$REPO_URL" ]; then
+        echo "ERROR: REPO_URL is empty!"
+        exit 1
+      fi
+
+      if [ ! -d "\$PROJECT_DIR/.git" ]; then
+        echo "Cloning repository..."
+        git clone --depth 1 "\$REPO_URL" "\$PROJECT_DIR" || exit 1
+        cd "\$PROJECT_DIR"
+        OLD_COMMIT=""
+        NEW_COMMIT=\$(git rev-parse HEAD)
+      else
+        echo "Updating repository..."
+        cd "\$PROJECT_DIR"
+
+        git remote set-url origin "\$REPO_URL"
+
+        OLD_COMMIT=\$(git rev-parse HEAD)
+
+        git fetch --depth 1 origin main || exit 1
+        git reset --hard origin/main || exit 1
+
+        NEW_COMMIT=\$(git rev-parse HEAD)
+
+        if [ "\$OLD_COMMIT" = "\$NEW_COMMIT" ]; then
+          echo "No changes detected. Skipping deployment."
+          exit 0
+        fi
+      fi
+
+      echo "Building Docker image..."
+      docker build --cache-from mya-gopi-web:latest -t mya-gopi-web:new . || exit 1
+
+      docker stop mya-gopi-web || true
+      docker rm mya-gopi-web || true
+      docker rmi mya-gopi-web:latest || true
+
+      docker tag mya-gopi-web:new mya-gopi-web:latest
+
+      docker run -d \
+        -p 83:80 \
+        --name mya-gopi-web \
+        --restart always \
+        mya-gopi-web:latest || exit 1
+
+      docker image prune -f
+
+      echo "Deployment successful!"
+      EOF
